@@ -3868,5 +3868,133 @@ document.getElementById('player-expand').addEventListener('touchmove', e => {
   }
 }, { passive: true });
 </script>
+
+<script>
+// ============================================================
+//  MEDIAN.CO — BACKGROUND AUDIO + LOCK SCREEN CONTROLS
+//  Works on Median APK. Degrades gracefully in plain browsers.
+// ============================================================
+
+// ── 1. Media Session API (lock screen / notification player) ──
+// Supported in Android WebView 73+, which Median uses.
+// Shows surah name, reciter, artwork, and play/pause/next/prev
+// controls on the lock screen and in the pull-down notification.
+
+function _msUpdate() {
+  if (!('mediaSession' in navigator)) return;
+  const s = state?.currentSurah;
+  const r = state?.currentReciter;
+  if (!s) return;
+
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title:  s.name   || 'Quran',
+    artist: r?.name  || 'Wirdly',
+    album:  s.ar     || 'القرآن الكريم',
+    artwork: [{
+      // Inline SVG so no external image is needed
+      src: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='512' height='512'%3E%3Crect width='512' height='512' rx='96' fill='%230d1510'/%3E%3Ccircle cx='256' cy='256' r='200' fill='none' stroke='%23c9962c' stroke-width='8'/%3E%3Ctext x='256' y='320' font-size='220' text-anchor='middle' font-family='serif' fill='%23c9962c'%D9%88%3C/text%3E%3C/svg%3E",
+      sizes: '512x512', type: 'image/svg+xml'
+    }]
+  });
+
+  navigator.mediaSession.playbackState = state.isPlaying ? 'playing' : 'paused';
+
+  // Update the seekable position state so the notification shows a progress bar
+  if (audio && audio.duration && isFinite(audio.duration)) {
+    try {
+      navigator.mediaSession.setPositionState({
+        duration:     audio.duration,
+        playbackRate: audio.playbackRate || 1,
+        position:     audio.currentTime  || 0,
+      });
+    } catch(e) {}
+  }
+}
+
+function _msRegisterHandlers() {
+  if (!('mediaSession' in navigator)) return;
+
+  const act = (name, fn) => {
+    try { navigator.mediaSession.setActionHandler(name, fn); } catch(e) {}
+  };
+
+  act('play',          () => { if (!state.isPlaying) togglePlay(); });
+  act('pause',         () => { if (state.isPlaying)  togglePlay(); });
+  act('nexttrack',     () => nextSurah());
+  act('previoustrack', () => prevSurah());
+  act('seekto',        (d) => { if (audio.duration) audio.currentTime = d.seekTime; });
+  act('seekforward',   ()  => { audio.currentTime = Math.min(audio.duration || 0, audio.currentTime + 10); });
+  act('seekbackward',  ()  => { audio.currentTime = Math.max(0, audio.currentTime - 10); });
+}
+
+// ── 2. Hook into the existing audio element ───────────────────
+// Called once the main app's audio object exists (it's created at
+// module scope so it's available immediately after the first script).
+
+function _initMediaSession() {
+  _msRegisterHandlers();
+
+  audio.addEventListener('play',  () => { _msUpdate(); });
+  audio.addEventListener('pause', () => {
+    if ('mediaSession' in navigator)
+      navigator.mediaSession.playbackState = 'paused';
+  });
+  audio.addEventListener('timeupdate', () => {
+    // Throttle position updates to once per second
+    const now = Date.now();
+    if (!_msUpdate._last || now - _msUpdate._last > 1000) {
+      _msUpdate._last = now;
+      _msUpdate();
+    }
+  });
+  audio.addEventListener('ended', () => {
+    if ('mediaSession' in navigator)
+      navigator.mediaSession.playbackState = 'paused';
+  });
+}
+
+// ── 3. Median-specific: tell the native shell audio is playing ─
+// Median exposes gonative.audio.* for background keep-alive.
+// If the bridge isn't present (plain browser) these calls silently no-op.
+
+function _medianAudioHooks() {
+  const gn = window.gonative;
+  if (!gn || !gn.audio) return;
+
+  // Register audio session so Android won't kill the process
+  audio.addEventListener('play', () => {
+    try { gn.audio.activateSession && gn.audio.activateSession(); } catch(e) {}
+  });
+  audio.addEventListener('pause', () => {
+    try { gn.audio.deactivateSession && gn.audio.deactivateSession(); } catch(e) {}
+  });
+  audio.addEventListener('ended', () => {
+    try { gn.audio.deactivateSession && gn.audio.deactivateSession(); } catch(e) {}
+  });
+}
+
+// ── 4. Median config object (read by the native shell at startup) ─
+// This tells Median to enable background audio and media controls.
+window.gonative_config = window.gonative_config || {};
+window.gonative_config.audio = {
+  backgroundAudio: true,
+  nowPlayingInfo:  true,   // shows lock-screen player on iOS too
+};
+
+// ── 5. Boot ────────────────────────────────────────────────────
+// Wait for the DOM + main app scripts to finish, then hook in.
+window.addEventListener('load', () => {
+  _initMediaSession();
+  _medianAudioHooks();
+
+  // Patch startSurah so the notification updates whenever a new surah starts
+  const _orig = window.startSurah;
+  window.startSurah = async function(surahN) {
+    await _orig(surahN);
+    // Small delay so state.currentSurah is already set
+    setTimeout(_msUpdate, 80);
+  };
+});
+</script>
 </body>
 </html>
