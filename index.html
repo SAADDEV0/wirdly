@@ -2958,9 +2958,19 @@ function _idbDel(store,key){return _openDB().then(db=>new Promise((res,rej)=>{co
 function _idbAllKeys(store){return _openDB().then(db=>new Promise((res,rej)=>{const t=db.transaction(store,'readonly');const q=t.objectStore(store).getAllKeys();q.onsuccess=()=>res(q.result||[]);q.onerror=()=>rej(q.error);}));}
 function _idbGetAll(store){return _openDB().then(db=>new Promise((res,rej)=>{const t=db.transaction(store,'readonly');const q=t.objectStore(store).getAll();q.onsuccess=()=>res(q.result||[]);q.onerror=()=>rej(q.error);}));}
 
+// Blob URLs are session-scoped — always create a fresh one from the stored blob.
+const _blobUrlCache = new Map();
 async function getCachedAudioUrl(recId,surahN,ayahN){
-  try{const blob=await _idbGet('audio_blobs',`${recId}_${surahN}_${ayahN}`);if(blob)return URL.createObjectURL(blob);}catch(e){}
-  return null;
+  const key=`${recId}_${surahN}_${ayahN}`;
+  try{
+    const blob=await _idbGet('audio_blobs',key);
+    if(!blob)return null;
+    const prev=_blobUrlCache.get(key);
+    if(prev)URL.revokeObjectURL(prev);
+    const url=URL.createObjectURL(blob);
+    _blobUrlCache.set(key,url);
+    return url;
+  }catch(e){return null;}
 }
 function fmtBytes(b){if(b<1024*1024)return(b/1024).toFixed(1)+' KB';return(b/(1024*1024)).toFixed(1)+' MB';}
 
@@ -3105,21 +3115,41 @@ async function startDownload(){
       </div>
       <button class="dl-del-btn" onclick="cancelDownload()">✕</button>
     </div>`);
-  _activeDl={surahN,reciterId,ayahFrom,ayahTo,total,done:0,cancelled:false};
+  _activeDl={surahN,reciterId,ayahFrom,ayahTo,total,done:0,cancelled:false,failed:0};
   let totalBytes=0;
-  const CONC=4;
+  const CONC=3; // conservative — avoids rate limiting
   const ayahs=Array.from({length:total},(_,i)=>ayahFrom+i);
+
+  // everyayah.com blocks fetch() with CORS. We route through a public CORS
+  // proxy so we can grab the blob for offline storage.
+  // corsproxy.io is free, no sign-up, works from WebView.
+  async function _fetchAyahBlob(ayahN){
+    const directUrl=ayahUrl(reciterId,surahN,ayahN);
+    const proxyUrl=`https://corsproxy.io/?${encodeURIComponent(directUrl)}`;
+    // Try direct first (works in some environments), fall back to proxy.
+    for(const url of [directUrl, proxyUrl]){
+      try{
+        const res=await fetch(url,{mode:'cors'});
+        if(!res.ok) continue;
+        const blob=await res.blob();
+        if(blob.size<500) continue; // suspiciously small — likely an error page
+        return blob;
+      }catch(e){ /* try next */ }
+    }
+    return null; // both failed
+  }
+
   for(let i=0;i<ayahs.length;i+=CONC){
     if(_activeDl.cancelled)break;
     await Promise.all(ayahs.slice(i,i+CONC).map(async ayahN=>{
       if(_activeDl.cancelled)return;
-      try{
-        const res=await fetch(ayahUrl(reciterId,surahN,ayahN));
-        if(!res.ok)throw new Error();
-        const blob=await res.blob();
+      const blob=await _fetchAyahBlob(ayahN);
+      if(blob){
         totalBytes+=blob.size;
         await _idbPut('audio_blobs',`${reciterId}_${surahN}_${ayahN}`,blob);
-      }catch(e){/* skip failed ayah */}
+      }else{
+        _activeDl.failed=(_activeDl.failed||0)+1;
+      }
       _activeDl.done++;
       const pct=(_activeDl.done/total)*100;
       const cEl=document.getElementById(`${pid}-cnt`);
@@ -3150,7 +3180,17 @@ async function startDownload(){
   }catch(e){}
   _activeDl=null;
   document.getElementById(pid)?.remove();
-  toast(`✅ ${surah.name} saved offline!`);
+  const failed=_activeDl===null?0:(_activeDl.failed||0);
+  if(totalBytes===0){
+    toast('⚠️ Download failed — check your connection');
+    renderDownloads();
+    return;
+  }
+  if((_activeDl?.failed||0)>0){
+    toast(`⚠️ ${surah.name} saved with ${_activeDl.failed} missing ayahs`);
+  }else{
+    toast(`✅ ${surah.name} saved offline!`);
+  }
   renderDownloads();
 }
 function cancelDownload(){if(_activeDl)_activeDl.cancelled=true;}
