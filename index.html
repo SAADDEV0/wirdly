@@ -48,6 +48,7 @@ html.light .btn-o{border-color:var(--bd)}
 html.light .btn-o:hover{border-color:rgba(0,0,0,.22)}
 html.light ::-webkit-scrollbar-thumb{background:var(--s3)}
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{height:100%;overflow:hidden}
 body{background:var(--bk);color:var(--t1);font-family:'DM Sans',sans-serif;
 height:100vh;overflow:hidden;display:grid;
 grid-template-columns:var(--sw) 1fr;grid-template-rows:1fr var(--ph);
@@ -435,20 +436,42 @@ input,button,select{font-family:inherit}
 @media(max-width:768px){
   :root{--sw:0px;--ph:60px;--mob-nav:56px}
 
-  /* Body: single column, no sidebar column, add bottom nav row */
+  /* Lock html+body — nothing scrolls except .main */
+  html{height:100dvh;overflow:hidden;overscroll-behavior:none}
   body{
     grid-template-columns:1fr;
-    grid-template-rows:1fr var(--ph);
-    grid-template-areas:"main""play";
+    grid-template-rows:1fr;
+    grid-template-areas:"main";
     height:100dvh;
-    padding-bottom:var(--mob-nav);
+    overflow:hidden;
+    overscroll-behavior:none;
+    padding-bottom:0;
   }
 
   /* Hide desktop sidebar */
   .sidebar{display:none}
 
-  /* Main fills width */
-  .main{grid-area:main;width:100%}
+  /* Main is the ONLY scrollable element */
+  .main{
+    grid-area:main;
+    width:100%;
+    height:100dvh;
+    overflow-y:auto;
+    overflow-x:hidden;
+    -webkit-overflow-scrolling:touch;
+    overscroll-behavior-y:contain;
+    /* leave room for player + bottom nav at bottom */
+    padding-bottom:calc(var(--ph) + var(--mob-nav));
+  }
+
+  /* Player bar: truly fixed above mob-nav */
+  .player{
+    position:fixed !important;
+    bottom:var(--mob-nav);
+    left:0;right:0;
+    height:var(--ph);
+    z-index:40;
+  }
 
   /* Topbar */
   .topbar{padding:10px 14px;gap:8px}
@@ -2136,7 +2159,9 @@ function syncWordToAudio() {
 // ═══════════════════ PLAYER ENGINE ═══════════════════
 function playSurah(id,vi=0){
   S.sid=id;S.vi=vi;S.wi=-1;S.prog=0;S.playing=true;repCount=0;
-  stopAnim();loadAudio(id);updateBar();startAnim();_notifyMedian();
+  stopAnim();loadAudio(id);updateBar();startAnim();
+  // Small delay so audio.src is set before we pass it to the native player
+  setTimeout(_startMedianPlayer, 400);
   S.recentlyPlayed=S.recentlyPlayed.filter(x=>x!==id);
   S.recentlyPlayed.unshift(id);
   if(S.recentlyPlayed.length>20) S.recentlyPlayed.pop();
@@ -2444,11 +2469,31 @@ function updatePlayerStatus(status) {
   }
 }
 
-// _notifyMedian() — call whenever track or play-state changes so Median's
-// native player stays in sync while the app is in the foreground.
+// _startMedianPlayer() — called when a new surah starts.
+// Calls playTrack() which:
+//   1. Asks Android for notification permission (first time)
+//   2. Creates the persistent notification with prev/play/pause/next
+//   3. Keeps showing even when app is open (Spotify-style)
+async function _startMedianPlayer() {
+  if (!window.median || !median.backgroundMedia) return;
+  const s = SURAHS[S.sid - 1];
+  const q = QARIS[S.qiid];
+  try {
+    await median.backgroundMedia.playTrack({
+      url:    audio.src || '',
+      title:  s.name + '  ' + s.ar,
+      artist: q.name + ' · ' + q.style,
+      album:  'Noor — The Holy Quran'
+    });
+  } catch(e) {}
+}
+
+// _notifyMedian() — keeps the notification in sync on play/pause/seek.
 function _notifyMedian() {
   try {
-    if (window.median && median.backgroundMedia && median.backgroundMedia.updateStatus) {
+    if (!window.median || !median.backgroundMedia) return;
+    // Update notification state (play/pause icon, seek position)
+    if (median.backgroundMedia.updateStatus) {
       median.backgroundMedia.updateStatus(getPlayerStatus());
     }
   } catch(e) {}
