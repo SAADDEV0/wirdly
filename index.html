@@ -2136,7 +2136,7 @@ function syncWordToAudio() {
 // ═══════════════════ PLAYER ENGINE ═══════════════════
 function playSurah(id,vi=0){
   S.sid=id;S.vi=vi;S.wi=-1;S.prog=0;S.playing=true;repCount=0;
-  stopAnim();loadAudio(id);updateBar();startAnim();
+  stopAnim();loadAudio(id);updateBar();startAnim();_notifyMedian();
   S.recentlyPlayed=S.recentlyPlayed.filter(x=>x!==id);
   S.recentlyPlayed.unshift(id);
   if(S.recentlyPlayed.length>20) S.recentlyPlayed.pop();
@@ -2152,6 +2152,7 @@ function togglePlay(){
   if(S.playing){ audio.play().catch(()=>{}); startAnim(); }
   else{ audio.pause(); stopAnim(); }
   updateBar();
+  _notifyMedian();
 }
 function stopAnim(){clearInterval(anim);clearTimeout(gapT);clearInterval(progT);anim=null;gapT=null;progT=null;}
 function startAnim(){
@@ -2398,6 +2399,59 @@ function _startMsPosSync() {
 }
 function _stopMsPosSync() {
   if (_msPosTimer) { clearInterval(_msPosTimer); _msPosTimer = null; }
+}
+
+// ═══════════════════ MEDIAN NATIVE BRIDGE ═══════════════════
+// getPlayerStatus() — Median calls this when the app is backgrounded.
+// We hand over current track info so the native player can show the
+// notification and lock-screen controls while the app is in background.
+function getPlayerStatus() {
+  const s = SURAHS[S.sid - 1];
+  const q = QARIS[S.qiid];
+  return {
+    url:         audio.src  || '',
+    currentTime: Math.round((audio.currentTime || 0) * 1000), // ms
+    isPaused:    !S.playing,
+    title:       s.name + '  ' + s.ar,
+    artist:      q.name + ' · ' + q.style,
+    album:       'Noor — The Holy Quran',
+    // artwork: omitted — Median falls back to app icon automatically
+  };
+}
+
+// updatePlayerStatus() — Median calls this when the app is foregrounded again.
+// Sync the web player back to wherever the native player is.
+function updatePlayerStatus(status) {
+  if (!status) return;
+
+  // Seek to where the native player left off (tolerance: 1.5 s)
+  if (status.currentTime != null && audio.duration) {
+    const t = status.currentTime / 1000;
+    if (Math.abs(audio.currentTime - t) > 1.5) audio.currentTime = t;
+  }
+
+  // Sync play / pause state
+  if (status.isPaused && S.playing) {
+    S.playing = false;
+    audio.pause();
+    stopAnim();
+    updateBar();
+  } else if (!status.isPaused && !S.playing) {
+    S.playing = true;
+    audio.play().catch(() => {});
+    startAnim();
+    updateBar();
+  }
+}
+
+// _notifyMedian() — call whenever track or play-state changes so Median's
+// native player stays in sync while the app is in the foreground.
+function _notifyMedian() {
+  try {
+    if (window.median && median.backgroundMedia && median.backgroundMedia.updateStatus) {
+      median.backgroundMedia.updateStatus(getPlayerStatus());
+    }
+  } catch(e) {}
 }
 
 function updateBar(){
