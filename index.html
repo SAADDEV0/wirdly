@@ -2160,8 +2160,8 @@ function syncWordToAudio() {
 function playSurah(id,vi=0){
   S.sid=id;S.vi=vi;S.wi=-1;S.prog=0;S.playing=true;repCount=0;
   stopAnim();loadAudio(id);updateBar();startAnim();
-  // Small delay so audio.src is set before we pass it to the native player
-  setTimeout(_startMedianPlayer, 400);
+  _startBgKeepAlive();
+  setTimeout(_startMedianPlayer, 600);
   S.recentlyPlayed=S.recentlyPlayed.filter(x=>x!==id);
   S.recentlyPlayed.unshift(id);
   if(S.recentlyPlayed.length>20) S.recentlyPlayed.pop();
@@ -2174,8 +2174,8 @@ function playSurah(id,vi=0){
 }
 function togglePlay(){
   S.playing=!S.playing;
-  if(S.playing){ audio.play().catch(()=>{}); startAnim(); }
-  else{ audio.pause(); stopAnim(); }
+  if(S.playing){ audio.play().catch(()=>{}); startAnim(); _startBgKeepAlive(); }
+  else{ audio.pause(); stopAnim(); _stopBgKeepAlive(); }
   updateBar();
   _notifyMedian();
 }
@@ -2433,14 +2433,14 @@ function _stopMsPosSync() {
 function getPlayerStatus() {
   const s = SURAHS[S.sid - 1];
   const q = QARIS[S.qiid];
+  const cdnUrl = (_ayahQueue[_ayahIdx] && _ayahQueue[_ayahIdx].url) || '';
   return {
-    url:         audio.src  || '',
-    currentTime: Math.round((audio.currentTime || 0) * 1000), // ms
+    url:         cdnUrl,
+    currentTime: Math.round((audio.currentTime || 0) * 1000),
     isPaused:    !S.playing,
     title:       s.name + '  ' + s.ar,
     artist:      q.name + ' · ' + q.style,
     album:       'Noor — The Holy Quran',
-    // artwork: omitted — Median falls back to app icon automatically
   };
 }
 
@@ -2480,7 +2480,7 @@ async function _startMedianPlayer() {
   const q = QARIS[S.qiid];
   try {
     await median.backgroundMedia.playTrack({
-      url:    audio.src || '',
+      url:    (_ayahQueue[_ayahIdx] && _ayahQueue[_ayahIdx].url) || '',
       title:  s.name + '  ' + s.ar,
       artist: q.name + ' · ' + q.style,
       album:  'Noor — The Holy Quran'
@@ -2498,6 +2498,37 @@ function _notifyMedian() {
     }
   } catch(e) {}
 }
+
+
+// ═══════════════════ BACKGROUND AUDIO KEEP-ALIVE ═══════════════════
+let _bgCtx = null;
+
+function _startBgKeepAlive() {
+  if (_bgCtx) return;
+  try {
+    _bgCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const gain = _bgCtx.createGain();
+    gain.gain.value = 0.001;
+    gain.connect(_bgCtx.destination);
+    const osc = _bgCtx.createOscillator();
+    osc.frequency.value = 1;
+    osc.connect(gain);
+    osc.start();
+  } catch(e) {}
+}
+
+function _stopBgKeepAlive() {
+  try { if (_bgCtx) { _bgCtx.close(); _bgCtx = null; } } catch(e) {}
+}
+
+// Resume audio when returning to app (screen unlock / tab switch)
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && S.playing && audio.paused) {
+    audio.play().catch(() => {});
+    _notifyMedian();
+    syncMediaSession();
+  }
+});
 
 function updateBar(){
   const s=SURAHS[S.sid-1],q=QARIS[S.qiid];
